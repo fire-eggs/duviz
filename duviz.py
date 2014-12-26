@@ -28,40 +28,9 @@ import os
 import sys
 import re
 import subprocess
-
-
-# TODO: catch absence/failure of du/ls subprocesses
-# TODO: how to handle unreadable subdirs in du/ls?
-# TODO: option to sort alphabetically (instead of on size)
-
-##############################################################################
-def terminal_size():
-    '''
-    Best effort guess of terminal size.
-
-    @return (height, width)
-    '''
-    try:
-        # Try to get size from ioctl system call (Unix only).
-        import struct, fcntl, termios
-        # Dummy string, determining answer buffer size
-        # (for struct of two unsigend short ints) for ioctl call.
-        dummy_string = struct.pack('HH', 0, 0)
-        # File descriptor of standard output.
-        file_descriptor = sys.stdout.fileno()
-        # The ioctl call to get terminal size.
-        answer = fcntl.ioctl(file_descriptor, termios.TIOCGWINSZ, dummy_string)
-        # Unpack answer to height and width values.
-        height, width = struct.unpack('HH', answer)
-    except (ImportError, IOError):
-        try:
-            # Try to get size from environment variables.
-            height, width = int(os.environ['LINES']), int(os.environ['COLUMNS'])
-        except KeyError:
-            # No info found: just use some sensible defaults.
-            height, width = (25, 80)
-    return height, width
-
+import ctypes
+import operator
+import math
 
 ##############################################################################
 def bar(width, label, fill='-', left='[', right=']', one='|'):
@@ -96,7 +65,7 @@ def _human_readable_size(size, base, formats):
     return formats[-1] % size
 
 
-def human_readable_byte_size(size, binary=False):
+def human_readable_byte_size(size, binary=True):
     '''Return byte size as 11B, 12.34KB or 345.24MB (or binary: 12.34KiB, 345.24MiB).'''
     if binary:
         return _human_readable_size(size, 1024, ['%dB', '%.2fKiB', '%.2fMiB', '%.2fGiB', '%.2fTiB'])
@@ -148,9 +117,13 @@ class DirectoryTreeNode(object):
         # By default this is assumed to be total node size, inclusive sub nodes,
         # otherwise recalculate_own_sizes_to_total_sizes() should be called.
         self.size = None
+        self.mySize = None # non-inclusive
+        self.fileCount = 0
+        self.myAllocSize = None
+        self.allocSize = None
+
         # Dictionary of subnodess
         self._subnodes = {}
-
 
     def import_path(self, path, size):
         '''
@@ -169,6 +142,30 @@ class DirectoryTreeNode(object):
         # Set size at cursor
         assert cursor.size == None
         cursor.size = size
+        cursor.mySize = size
+        cursor.allocSize = 0
+        cursor.myAllocSize = 0
+
+        return cursor
+
+    def AddFile(self, filename, filesize):
+        '''
+        Add a file to this node.
+        @param filename: the name of the file to add
+        @param size: size of the file in bytes.
+        '''
+        self.size += filesize   # accumulated file sizes
+        self.mySize += filesize # my file sizes
+        self.fileCount += 1
+        self.allocSize += math.ceil(filesize/gClusterSize) * gClusterSize
+        self.myAllocSize += math.ceil(filesize/gClusterSize) * gClusterSize
+        # TODO track largest file in folder
+
+    def AddDir(self, sub_tree):
+        self.size += sub_tree.size      # add sub-node size to self
+        self.allocSize += sub_tree.allocSize
+        # TODO accumulated file counts
+        # TODO accumulated largest file
 
     def recalculate_own_sizes_to_total_sizes(self):
         '''
@@ -196,13 +193,13 @@ class DirectoryTreeNode(object):
 
         # Display of current dir.
         lines.append(bar(width, self.name, fill=' '))
+        lines.append(bar(width, size_renderer(self.allocSize), fill=' '))
         lines.append(bar(width, size_renderer(self.size), fill='_'))
 
         # Display of subdirectories.
-        subdirs = self._subnodes.values()
+        subdirs = sorted(self._subnodes.values(), key=operator.attrgetter('name'))
         if len(subdirs) > 0:
             # Generate block display.
-            subdirs.sort()
             subdir_blocks = []
             cumsize = 0
             currpos = 0
@@ -225,59 +222,64 @@ class DirectoryTreeNode(object):
 
         return '\n'.join(lines)
 
+    def size_render(self, size_renderer=human_readable_byte_size):
+        return "{} ({}):".format(size_renderer(self.size), size_renderer(self.allocSize))
+
+    def tree_display(self, size_renderer=human_readable_byte_size):
+        subdirs = sorted(self._subnodes.values(), key=operator.attrgetter('allocSize'), reverse=True)
+
+        size_wide = len(self.size_render())
+        for sd in subdirs:
+            size_wide = max(len(sd.size_render()), size_wide)
+
+        lines = []
+
+        lines.append("+{0:>{wide}} {1}".format(self.size_render(), self.name, wide=size_wide))
+        for sd in subdirs:
+            lines.append('|')
+            lines.append("`-{0:>{wide}} {1}".format(sd.size_render(), sd.name, wide=size_wide))
+
+        return '\n'.join(lines)
 
 class SubprocessException(Exception):
     pass
 
 
+dirCount = 0 # dirty hack: display progress messages only periodically
+
 ##############################################################################
-def build_du_tree(directory, feedback=sys.stdout, terminal_width=80, one_filesystem=False, dereference=False):
+def build_du_tree(directory):
     '''
     Build a tree of DirectoryTreeNodes, starting at the given directory.
     '''
-
-    # Measure size in 1024 byte blocks. The GNU-du option -b enables counting
-    # in bytes directely, but it is not available in BSD-du.
-    duargs = ['-k']
-    # Handling of symbolic links.
-    if one_filesystem:
-        duargs.append('-x')
-    if dereference:
-        duargs.append('-L')
-    try:
-        du_pipe = subprocess.Popen(['du'] + duargs + [directory], stdout=subprocess.PIPE)
-    except OSError:
-        raise SubprocessException('Failed to launch "du" utility subprocess. Is it installed and in your PATH?')
-
-    dir_tree = _build_du_tree(directory, du_pipe.stdout, feedback=feedback, terminal_width=terminal_width)
-
-    du_pipe.stdout.close()
-
-    return dir_tree
-
-
-def _build_du_tree(directory, du_pipe, feedback=None, terminal_width=80):
-    '''
-    Helper function
-    '''
-    du_rep = re.compile(r'([0-9]*)\s*(.*)')
-
+    directory = os.path.realpath(directory)
     dir_tree = DirectoryTreeNode(directory)
-
-    for line in du_pipe:
-        mo = du_rep.match(line)
-        # Size in bytes.
-        size = int(mo.group(1)) * 1024
-        path = mo.group(2)
-        if feedback:
-            feedback.write(('scanning %s' % path).ljust(terminal_width)[:terminal_width] + '\r')
-        dir_tree.import_path(path, size)
-    if feedback:
-        feedback.write(' ' * terminal_width + '\r')
+    _build_du_tree(directory, dir_tree)
+    sys.stdout.write(' ' * terminal_width + '\r')
 
     return dir_tree
 
+def _build_du_tree(directory, dir_tree):
+    global dirCount
 
+    if (dirCount % 100 == 0):
+        sys.stdout.write(('scanning %s' % directory).ljust(terminal_width)[:terminal_width] + '\r')
+
+    dirCount += 1
+
+    me = dir_tree.import_path(directory,0)
+
+    for athing in os.listdir(directory):
+        fullpath = os.path.join(directory, athing)
+        if (not os.path.isfile(fullpath)):
+            sub_tree = _build_du_tree(fullpath, dir_tree)  # DFS to get this full sub-node
+            me.AddDir(sub_tree)
+        else:
+            me.AddFile(athing, os.path.getsize(fullpath))
+
+    return me
+
+# TODO needs to be disabled on Windows
 def build_inode_count_tree(directory, feedback=sys.stdout, terminal_width=80):
     '''
     Build tree of DirectoryTreeNodes withinode counts.
@@ -294,7 +296,7 @@ def build_inode_count_tree(directory, feedback=sys.stdout, terminal_width=80):
 
     return tree
 
-
+# TODO needs to be disabled on Windows
 def _build_inode_count_tree(directory, ls_pipe, feedback=None, terminal_width=80):
     tree = DirectoryTreeNode(directory)
     # Path of current directory.
@@ -341,11 +343,27 @@ def _build_inode_count_tree(directory, ls_pipe, feedback=None, terminal_width=80
 
     return tree
 
+# For Windows: determine the cluster size for allocated file size
+def getClusterSize():
+    sectorsPerCluster = ctypes.c_ulonglong(0)
+    bytesPerSector = ctypes.c_ulonglong(0)
+    rootPathName = ctypes.c_wchar_p(u"c:\\") # TODO change to drive being scanned!
+    ctypes.windll.kernel32.GetDiskFreeSpaceW(rootPathName,ctypes.pointer(sectorsPerCluster),ctypes.pointer(bytesPerSector),None,None)
+    global gClusterSize
+    gClusterSize = (int)(sectorsPerCluster.value) * (int)(bytesPerSector.value)
+
+# Hack: specify the output terminal width.
+# TODO: use the Unix/Windows appropriate mechanisms
+def getTerminalSize():
+    global terminal_width
+    os.system("mode con lines=25 cols=131")
+    terminal_width = 130
 
 ##############################################################################
 def main():
 
-    terminal_width = terminal_size()[1]
+    getClusterSize()
+    getTerminalSize()
 
     #########################################
     # Handle commandline interface.
@@ -394,14 +412,21 @@ def main():
     else:
         feedback = None
 
-    if clioptions.inode_count:
-        for directory in paths:
-            tree = build_inode_count_tree(directory, feedback=feedback, terminal_width=clioptions.display_width)
-            print tree.block_display(clioptions.display_width, max_depth=clioptions.max_depth, size_renderer=human_readable_count)
-    else:
-        for directory in paths:
-            tree = build_du_tree(directory, feedback=feedback, terminal_width=clioptions.display_width, one_filesystem=clioptions.onefilesystem, dereference=clioptions.dereference)
-            print tree.block_display(clioptions.display_width, max_depth=clioptions.max_depth)
+    for directory in paths:
+        tree = build_du_tree(directory)
+        print (tree.tree_display())
+        #print (tree.block_display(clioptions.display_width, max_depth=clioptions.max_depth))
 
 if __name__ == '__main__':
     main()
+
+# TODO display largest file
+# TODO display size in "this" folder (?)
+
+# TODO file age statistics
+# TODO file outlier statistics
+# TODO allocated vs actual (how to get disk allocation size on windows?)
+
+# TODO tree view
+
+# TODO determine console size Windows/Unix
