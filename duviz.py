@@ -31,6 +31,9 @@ import subprocess
 import ctypes
 import operator
 import math
+import platform # todo replace with os calls?
+
+from terminalsize import get_terminal_size
 
 ##############################################################################
 def bar(width, label, fill='-', left='[', right=']', one='|'):
@@ -116,7 +119,7 @@ class DirectoryTreeNode(object):
         # Total size of node.
         # By default this is assumed to be total node size, inclusive sub nodes,
         # otherwise recalculate_own_sizes_to_total_sizes() should be called.
-        self.size = None
+        self.size = None   # inclusive
         self.mySize = None # non-inclusive
         self.fileCount = 0
         self.myAllocSize = None
@@ -279,7 +282,6 @@ def _build_du_tree(directory, dir_tree):
 
     return me
 
-# TODO needs to be disabled on Windows
 def build_inode_count_tree(directory, feedback=sys.stdout, terminal_width=80):
     '''
     Build tree of DirectoryTreeNodes withinode counts.
@@ -296,7 +298,6 @@ def build_inode_count_tree(directory, feedback=sys.stdout, terminal_width=80):
 
     return tree
 
-# TODO needs to be disabled on Windows
 def _build_inode_count_tree(directory, ls_pipe, feedback=None, terminal_width=80):
     tree = DirectoryTreeNode(directory)
     # Path of current directory.
@@ -356,8 +357,9 @@ def getClusterSize():
 # TODO: use the Unix/Windows appropriate mechanisms
 def getTerminalSize():
     global terminal_width
-    os.system("mode con lines=25 cols=131")
-    terminal_width = 130
+    os.system("mode con lines=25 cols=130")  # TODO hack for debugging
+    terminal_width, ignore  = get_terminal_size()
+    terminal_width -= 1 # seems to be necessary on windows? \r vs \r\n ?
 
 ##############################################################################
 def main():
@@ -385,9 +387,10 @@ def main():
     cliparser.add_option('--max-depth',
         action='store', type='int', dest='max_depth', default=5,
         help='maximum recursion depth', metavar='N')
-    cliparser.add_option('-i', '--inodes',
-        action='store_true', dest='inode_count', default=False,
-        help='count inodes instead of file size')
+    if (platform.system() != 'Windows'):
+        cliparser.add_option('-i', '--inodes',
+            action='store_true', dest='inode_count', default=False,
+            help='count inodes instead of file size')
     cliparser.add_option('--no-progress',
         action='store_false', dest='show_progress', default=True,
         help='disable progress reporting')
@@ -396,6 +399,8 @@ def main():
 
     ########################################
     # Make sure we have a valid list of paths
+
+    paths = ['.']  # Do current dir if no dirs are given.
     if len(cliargs) > 0:
         paths = []
         for path in cliargs:
@@ -403,9 +408,6 @@ def main():
                 paths.append(path)
             else:
                 sys.stderr.write('Warning: not a valid path: "%s"\n' % path)
-    else:
-        # Do current dir if no dirs are given.
-        paths = ['.']
 
     if clioptions.show_progress:
         feedback = sys.stdout
@@ -420,7 +422,9 @@ def main():
 if __name__ == '__main__':
     main()
 
-# TODO display largest file
+# TODO display largest file (in tree)
+# TODO display largest file (local)
+
 # TODO display size in "this" folder (?)
 
 # TODO file age statistics
