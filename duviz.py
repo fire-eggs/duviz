@@ -105,7 +105,6 @@ def path_split(path, base=''):
     return items
 
 
-
 ##############################################################################
 class DirectoryTreeNode(object):
     '''
@@ -116,16 +115,19 @@ class DirectoryTreeNode(object):
     def __init__(self, path):
         # Name of the node. For root node: path up to root node as given, for subnodes: just the folder name
         self.name = path
+
         # Total size of node.
         # By default this is assumed to be total node size, inclusive sub nodes,
         # otherwise recalculate_own_sizes_to_total_sizes() should be called.
         self.size = None   # inclusive
         self.mySize = None # non-inclusive
         self.fileCount = 0
-        self.myAllocSize = None
-        self.allocSize = None
+        self.myAllocSize = None # non-inclusive
+        self.allocSize = None   # inclusive
 
-        # Dictionary of subnodess
+        # TODO file information should go in a separate class?
+
+        # Dictionary of subnodes
         self._subnodes = {}
 
     def import_path(self, path, size):
@@ -142,12 +144,13 @@ class DirectoryTreeNode(object):
             if component not in cursor._subnodes:
                 cursor._subnodes[component] = DirectoryTreeNode(component)
             cursor = cursor._subnodes[component]
+
         # Set size at cursor
         assert cursor.size == None
         cursor.size = size
         cursor.mySize = size
-        cursor.allocSize = 0
-        cursor.myAllocSize = 0
+        cursor.allocSize = AllocatedSize(size)
+        cursor.myAllocSize = AllocatedSize(size)
 
         return cursor
 
@@ -160,8 +163,8 @@ class DirectoryTreeNode(object):
         self.size += filesize   # accumulated file sizes
         self.mySize += filesize # my file sizes
         self.fileCount += 1
-        self.allocSize += math.ceil(filesize/gClusterSize) * gClusterSize
-        self.myAllocSize += math.ceil(filesize/gClusterSize) * gClusterSize
+        self.allocSize += AllocatedSize(filesize)
+        self.myAllocSize += AllocatedSize(filesize)
         # TODO track largest file in folder
 
     def AddDir(self, sub_tree):
@@ -200,7 +203,7 @@ class DirectoryTreeNode(object):
         lines.append(bar(width, size_renderer(self.size), fill='_'))
 
         # Display of subdirectories.
-        subdirs = sorted(self._subnodes.values(), key=operator.attrgetter('name'))
+        subdirs = sorted(self._subnodes.values(), key=operator.attrgetter('name'))  # TODO by name or size (largest first?)
         if len(subdirs) > 0:
             # Generate block display.
             subdir_blocks = []
@@ -258,7 +261,7 @@ def build_du_tree(directory):
     directory = os.path.realpath(directory)
     dir_tree = DirectoryTreeNode(directory)
     _build_du_tree(directory, dir_tree)
-    sys.stdout.write(' ' * terminal_width + '\r')
+    sys.stdout.write(' ' * terminal_width + '\r') # TODO feedback
 
     return dir_tree
 
@@ -266,7 +269,7 @@ def _build_du_tree(directory, dir_tree):
     global dirCount
 
     if (dirCount % 100 == 0):
-        sys.stdout.write(('scanning %s' % directory).ljust(terminal_width)[:terminal_width] + '\r')
+        sys.stdout.write(('scanning %s' % directory).ljust(terminal_width)[:terminal_width] + '\r') # TODO feedback
 
     dirCount += 1
 
@@ -275,7 +278,7 @@ def _build_du_tree(directory, dir_tree):
     for athing in os.listdir(directory):
         fullpath = os.path.join(directory, athing)
         if (not os.path.isfile(fullpath)):
-            sub_tree = _build_du_tree(fullpath, dir_tree)  # DFS to get this full sub-node
+            sub_tree = _build_du_tree(fullpath, dir_tree)  # Depth-First-Search to get this full sub-node
             me.AddDir(sub_tree)
         else:
             me.AddFile(athing, os.path.getsize(fullpath))
@@ -346,12 +349,21 @@ def _build_inode_count_tree(directory, ls_pipe, feedback=None, terminal_width=80
 
 # For Windows: determine the cluster size for allocated file size
 def getClusterSize():
-    sectorsPerCluster = ctypes.c_ulonglong(0)
-    bytesPerSector = ctypes.c_ulonglong(0)
-    rootPathName = ctypes.c_wchar_p(u"c:\\") # TODO change to drive being scanned!
-    ctypes.windll.kernel32.GetDiskFreeSpaceW(rootPathName,ctypes.pointer(sectorsPerCluster),ctypes.pointer(bytesPerSector),None,None)
-    global gClusterSize
-    gClusterSize = (int)(sectorsPerCluster.value) * (int)(bytesPerSector.value)
+    global gClusterSize 
+    gClusterSize = None
+
+    if (platform.system() == 'Windows'):
+        sectorsPerCluster = ctypes.c_ulonglong(0)
+        bytesPerSector = ctypes.c_ulonglong(0)
+        rootPathName = ctypes.c_wchar_p(u"c:\\") # TODO change to drive being scanned!
+        ctypes.windll.kernel32.GetDiskFreeSpaceW(rootPathName,ctypes.pointer(sectorsPerCluster),ctypes.pointer(bytesPerSector),None,None)
+        gClusterSize = (int)(sectorsPerCluster.value) * (int)(bytesPerSector.value)
+
+def AllocatedSize(size):
+    if (gClusterSize != None):
+        return math.ceil(size/gClusterSize) * gClusterSize
+    else:
+        return 0
 
 # Hack: specify the output terminal width.
 # TODO: use the Unix/Windows appropriate mechanisms
@@ -366,6 +378,8 @@ def main():
 
     getClusterSize()
     getTerminalSize()
+
+    # TODO block/tree display option
 
     #########################################
     # Handle commandline interface.
@@ -430,7 +444,3 @@ if __name__ == '__main__':
 # TODO file age statistics
 # TODO file outlier statistics
 # TODO allocated vs actual (how to get disk allocation size on windows?)
-
-# TODO tree view
-
-# TODO determine console size Windows/Unix
