@@ -121,11 +121,16 @@ class DirectoryTreeNode(object):
         # otherwise recalculate_own_sizes_to_total_sizes() should be called.
         self.size = None   # inclusive
         self.mySize = None # non-inclusive
-        self.fileCount = 0
         self.myAllocSize = None # non-inclusive
         self.allocSize = None   # inclusive
 
-        # TODO file information should go in a separate class?
+        # TODO file information should go in separate class(es)
+        self.fileCount = 0
+        self.myFileCount = 0
+        self.largestFileSize = 0
+        self.largestFileName = ''
+        self.myLargestFileSize = 0
+        self.myLargestFileName = ''
 
         # Dictionary of subnodes
         self._subnodes = {}
@@ -162,16 +167,31 @@ class DirectoryTreeNode(object):
         '''
         self.size += filesize   # accumulated file sizes
         self.mySize += filesize # my file sizes
-        self.fileCount += 1
         self.allocSize += AllocatedSize(filesize)
         self.myAllocSize += AllocatedSize(filesize)
-        # TODO track largest file in folder
+
+        self.fileCount += 1
+        self.myFileCount += 1
+
+        # track largest file in folder
+        if (filesize > self.myLargestFileSize):
+            self.myLargestFileSize = filesize
+            self.myLargestFileName = filename
+        if (filesize > self.largestFileSize):
+            self.largestFileSize = filesize
+            self.largestFileName = filename
 
     def AddDir(self, sub_tree):
         self.size += sub_tree.size      # add sub-node size to self
         self.allocSize += sub_tree.allocSize
-        # TODO accumulated file counts
-        # TODO accumulated largest file
+        
+        # accumulated file counts
+        self.fileCount += sub_tree.fileCount
+
+        # accumulated largest file
+        if (sub_tree.largestFileSize > self.largestFileSize):
+            self.largestFileSize = sub_tree.largestFileSize
+            self.largestFileName = sub_tree.largestFileName
 
     def recalculate_own_sizes_to_total_sizes(self):
         '''
@@ -231,9 +251,14 @@ class DirectoryTreeNode(object):
     def size_render(self, size_renderer=human_readable_byte_size):
         return "{} ({}):".format(size_renderer(self.size), size_renderer(self.allocSize))
 
+    # Tree display of the form:
+    # <size> (<alloc-size>): <foldername>
+    #
+    # TODO recursive display
     def tree_display(self, size_renderer=human_readable_byte_size):
         subdirs = sorted(self._subnodes.values(), key=operator.attrgetter('allocSize'), reverse=True)
 
+        # line up filenames vertically by determining the widest size string
         size_wide = len(self.size_render())
         for sd in subdirs:
             size_wide = max(len(sd.size_render()), size_wide)
@@ -241,9 +266,14 @@ class DirectoryTreeNode(object):
         lines = []
 
         lines.append("+{0:>{wide}} {1}".format(self.size_render(), self.name, wide=size_wide))
+        lines.append('{0:>{wide}} {1},{2}'.format('Counts:', self.myFileCount, self.fileCount, wide=size_wide+2))
+        lines.append('{0:>{wide}} {1}({2})'.format('Larges:', self.largestFileName, size_renderer(self.largestFileSize), wide=size_wide+2))
+
         for sd in subdirs:
             lines.append('|')
             lines.append("`-{0:>{wide}} {1}".format(sd.size_render(), sd.name, wide=size_wide))
+            lines.append('{0:>{wide}} {1},{2}'.format('Counts:', sd.myFileCount, sd.fileCount, wide=size_wide+2))
+            lines.append('{0:>{wide}} {1}({2})'.format('Larges:', sd.largestFileName, size_renderer(sd.largestFileSize), wide=size_wide+2))
 
         return '\n'.join(lines)
 
@@ -369,7 +399,7 @@ def AllocatedSize(size):
 # TODO: use the Unix/Windows appropriate mechanisms
 def getTerminalSize():
     global terminal_width
-    os.system("mode con lines=25 cols=130")  # TODO hack for debugging
+    os.system("mode con lines=40 cols=130")  # TODO hack for debugging
     terminal_width, ignore  = get_terminal_size()
     terminal_width -= 1 # seems to be necessary on windows? \r vs \r\n ?
 
@@ -437,10 +467,12 @@ if __name__ == '__main__':
     main()
 
 # TODO display largest file (in tree)
-# TODO display largest file (local)
 
 # TODO display size in "this" folder (?)
 
 # TODO file age statistics
 # TODO file outlier statistics
-# TODO allocated vs actual (how to get disk allocation size on windows?)
+
+# TODO question: only track "my" data (at per-node level) and roll-up accumulated data later?
+
+# TODO possibly more useful to accumulate a table of data and let the caller read/process/display as desired
