@@ -32,6 +32,7 @@ def AllocatedSize(size):
     return size
 
 def build_du_tree(folder):
+    lines = []
     folder = os.path.realpath(folder) # TODO is this necessary?
     for root, dirs, files in os.walk(folder):
         largeF = ('',0)
@@ -39,7 +40,7 @@ def build_du_tree(folder):
         rootAllocSize = 0
         rootFileCount = len(files)
 
-        if (rootFileCount > 0): # max falls over if tuples is empty
+        if (rootFileCount > 0): # 'max' falls over if tuples is empty
             filesizes = []
             allocsizes = []
             fileAccess = []
@@ -64,8 +65,9 @@ def build_du_tree(folder):
             oldAF = min(accessTup, key=lambda x:x[1])
 
         # TODO drive which columns appear based on options
-        print('{1}|{2}|{5}|{3}|{4}|{6}|{7}|{0}'.format(root, rootFileCount, rootFileSize, largeF[0], largeF[1], rootAllocSize, oldCF[0], oldCF[1]))
-        (build_du_tree(dir) for dir in dirs)
+        lines.append('{1}|{2}|{5}|{3}|{4}|{6}|{7}|{0}'.format(root, rootFileCount, rootFileSize, largeF[0], largeF[1], rootAllocSize, oldCF[0], oldCF[1]))
+        (lines.append(subline) for subline in (build_du_tree(dir) for dir in dirs))
+    return lines
 
 def main():
 
@@ -83,8 +85,9 @@ def main():
                 sys.stderr.write('Warning: not a valid path: "%s"\n' % path)
 
     for directory in paths:
-        build_du_tree(directory)
-
+        lines = build_du_tree(directory)
+        for line in lines:
+            print(line)
 
 if __name__ == '__main__':
     main()
