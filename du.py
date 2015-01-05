@@ -32,6 +32,7 @@ def AllocatedSize(size):
     return size
 
 def build_du_tree(folder):
+    getClusterSize() # TODO undefined if called by other module; need to split out into controller function
     lines = []
     folder = os.path.realpath(folder) # TODO is this necessary?
     for root, dirs, files in os.walk(folder):
@@ -45,6 +46,7 @@ def build_du_tree(folder):
             allocsizes = []
             fileAccess = []
             fileCreate = []
+            fileMod = []
             for name in files:
                 aStat = os.stat(os.path.join(root,name))
                 aSize = aStat.st_size
@@ -53,6 +55,7 @@ def build_du_tree(folder):
                 allocsizes.append(AllocatedSize(aSize))
                 fileAccess.append(aStat.st_atime)
                 fileCreate.append(aStat.st_ctime)
+                fileMod.append(aStat.st_mtime)
 
             rootFileSize = sum(filesizes)
             rootAllocSize = sum(allocsizes)
@@ -60,12 +63,22 @@ def build_du_tree(folder):
             sizeTup = list(zip(files, filesizes))
             createTup = list(zip(files, fileCreate))
             accessTup = list(zip(files, fileAccess))
+            modTup = list(zip(files, fileMod))
             largeF = max(sizeTup, key=lambda x:x[1])
             oldCF = min(createTup, key=lambda x:x[1])
             oldAF = min(accessTup, key=lambda x:x[1])
+            oldMF = min(modTup, key=lambda x:x[1])
+
+        # Windows HACK: on copying files, the 'create' date can be AFTER the 'modify' date
+        oldF = oldCF[0]
+        oldFD = oldCF[1]
+        if (oldMF[1] < oldCF[1]):
+            oldF = oldMF[0]
+            oldFD = oldMF[1]
 
         # TODO drive which columns appear based on options
-        lines.append('{1}|{2}|{5}|{3}|{4}|{6}|{7}|{0}'.format(root, rootFileCount, rootFileSize, largeF[0], largeF[1], rootAllocSize, oldCF[0], oldCF[1]))
+        # count|size|alloc|largeFN|largeF_Size|oldFN|oldF_Date|path
+        lines.append('{1}|{2}|{5}|{3}|{4}|{6}|{7}|{0}'.format(root, rootFileCount, rootFileSize, largeF[0], largeF[1], rootAllocSize, oldF, oldFD))
         (lines.append(subline) for subline in (build_du_tree(dir) for dir in dirs))
     return lines
 
@@ -88,6 +101,7 @@ def main():
         lines = build_du_tree(directory)
         for line in lines:
             print(line)
+        print(len(lines))
 
 if __name__ == '__main__':
     main()
